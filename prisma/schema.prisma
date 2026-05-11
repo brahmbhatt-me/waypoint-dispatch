@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  PASSENGER
+  DRIVER
+  ADMIN
+}
+
+enum TripStatus {
+  OPEN       // Accepting signups
+  GENERATING // Admin generating assignments
+  LOCKED     // Assignments finalized, shared with drivers
+  COMPLETED  // Trip done
+}
+
+// ─── USERS ────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(cuid())
+  name           String
+  phone          String   @unique
+  email          String?  @unique
+  role           Role     @default(PASSENGER)
+  // Saved default/home dropoff address
+  defaultAddress String?
+  defaultLat     Float?
+  defaultLng     Float?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  attendances    Attendance[]
+  driverSessions DriverSession[]
+  addressHistory AddressHistory[]
+
+  @@map("users")
+}
+
+// ─── TRIPS ────────────────────────────────────────────────────────────────────
+
+model Trip {
+  id          String     @id @default(cuid())
+  // Normalized to Saturday at midnight UTC
+  date        DateTime   @unique
+  status      TripStatus @default(OPEN)
+  notes       String?    // Admin notes for the week
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  attendances    Attendance[]
+  driverSessions DriverSession[]
+  assignments    Assignment[]
+
+  @@map("trips")
+}
+
+// ─── PASSENGER ATTENDANCE (per-trip) ─────────────────────────────────────────
+
+model Attendance {
+  id             String   @id @default(cuid())
+  userId         String
+  tripId         String
+  // This week's specific dropoff (may differ from default)
+  dropoffAddress String
+  dropoffLat     Float?
+  dropoffLng     Float?
+  notes          String?
+  attending      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User        @relation(fields: [userId], references: [id])
+  trip         Trip        @relation(fields: [tripId], references: [id])
+  // Set when admin generates assignments
+  assignmentId String?
+  assignment   Assignment? @relation(fields: [assignmentId], references: [id])
+
+  @@unique([userId, tripId])
+  @@map("attendances")
+}
+
+// ─── DRIVER SESSIONS (per-trip availability) ──────────────────────────────────
+
+model DriverSession {
+  id        String   @id @default(cuid())
+  userId    String
+  tripId    String
+  seats     Int      // Number of passenger seats available (not counting driver)
+  carType   String?  // e.g., "Honda Odyssey", "Toyota Camry"
+  available Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user       User        @relation(fields: [userId], references: [id])
+  trip       Trip        @relation(fields: [tripId], references: [id])
+  assignment Assignment?
+
+  @@unique([userId, tripId])
+  @@map("driver_sessions")
+}
+
+// ─── ASSIGNMENTS (driver → passengers for a trip) ─────────────────────────────
+
+model Assignment {
+  id              String   @id @default(cuid())
+  tripId          String
+  driverSessionId String   @unique
+  // JSON array of attendance IDs in optimized stop order
+  stopOrder       Json?
+  // Generated Google Maps URL
+  mapsUrl         String?
+  // Total estimated driving minutes (from Distance Matrix)
+  estimatedMinutes Int?
+  isLocked        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  trip          Trip          @relation(fields: [tripId], references: [id])
+  driverSession DriverSession @relation(fields: [driverSessionId], references: [id])
+  passengers    Attendance[]
+
+  @@map("assignments")
+}
+
+// ─── ADDRESS HISTORY ──────────────────────────────────────────────────────────
+
+model AddressHistory {
+  id      String   @id @default(cuid())
+  userId  String
+  address String
+  lat     Float?
+  lng     Float?
+  usedAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("address_history")
+}
