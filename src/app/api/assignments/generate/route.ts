@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
       tripId = trip.id;
     }
 
-    await prisma.trip.update({ where: { id: tripId }, data: { status: "GENERATING" } });
+    await prisma.trip.update({ where: { id: tripId }, data: { status: "GOING_LOCKED" } });
 
     // Fetch attending passengers (not marked absent)
     const attendances = await prisma.attendance.findMany({

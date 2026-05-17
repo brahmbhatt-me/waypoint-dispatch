@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     const tripsToLock = await prisma.trip.findMany({
       where: {
         date: { lt: yesterday },
-        status: { in: ["OPEN", "GENERATING"] },
+        status: { in: ["OPEN", "GOING_LOCKED"] },
         assignments: { some: {} },
       },
     });
