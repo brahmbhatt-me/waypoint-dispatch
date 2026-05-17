@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizePhone, getThisSaturday } from "@/lib/utils";
+import { geocodeAddress } from "@/lib/maps";
 
-// GET /api/drivers?tripId=...
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const tripId = searchParams.get("tripId");
@@ -23,13 +23,7 @@ export async function GET(req: NextRequest) {
         where: { tripId, available: true },
         include: {
           user: { select: { name: true, phone: true } },
-          assignment: {
-            include: {
-              passengers: {
-                include: { user: { select: { name: true } } },
-              },
-            },
-          },
+          assignment: { include: { _count: { select: { passengers: true } } } },
         },
         orderBy: { createdAt: "asc" },
       });
@@ -43,9 +37,10 @@ export async function GET(req: NextRequest) {
           carType: s.carType,
           seats: s.seats,
           available: s.available,
+          startAddress: s.startAddress,
           notes: s.notes,
           assignmentId: s.assignment?.id ?? null,
-          passengerCount: s.assignment?.passengers.length ?? 0,
+          passengerCount: s.assignment?._count.passengers ?? 0,
         }))
       );
     }
@@ -57,30 +52,32 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST /api/drivers — register driver availability
 export async function POST(req: NextRequest) {
   try {
-    const { name, phone, seats, carType, notes } = await req.json();
+    const { name, phone, seats, carType, startAddress, startLat, startLng, notes } = await req.json();
 
     if (!name || !phone || !seats) {
       return NextResponse.json({ error: "Name, phone, and seats required" }, { status: 400 });
     }
 
-    if (seats < 1 || seats > 10) {
-      return NextResponse.json({ error: "Seats must be between 1 and 10" }, { status: 400 });
-    }
-
     const normalizedPhone = normalizePhone(phone);
     const saturday = getThisSaturday();
 
-    // Upsert user (mark as DRIVER role)
+    // Geocode start address if needed
+    let finalStartLat = startLat ?? null;
+    let finalStartLng = startLng ?? null;
+    let finalStartAddress = startAddress;
+    if (startAddress && !finalStartLat) {
+      const geo = await geocodeAddress(startAddress);
+      if (geo) { finalStartAddress = geo.address; finalStartLat = geo.lat; finalStartLng = geo.lng; }
+    }
+
     const user = await prisma.user.upsert({
       where: { phone: normalizedPhone },
       update: { name, role: "DRIVER" },
       create: { name, phone: normalizedPhone, role: "DRIVER" },
     });
 
-    // Upsert trip
     const trip = await prisma.trip.upsert({
       where: { date: saturday },
       update: {},
@@ -88,51 +85,18 @@ export async function POST(req: NextRequest) {
     });
 
     if (trip.status === "LOCKED") {
-      return NextResponse.json(
-        { error: "Assignments are locked. Contact the organizer." },
-        { status: 403 }
-      );
+      return NextResponse.json({ error: "Assignments are locked." }, { status: 403 });
     }
 
-    // Upsert driver session
     const session = await prisma.driverSession.upsert({
       where: { userId_tripId: { userId: user.id, tripId: trip.id } },
-      update: { seats, carType, notes, available: true },
-      create: {
-        userId: user.id,
-        tripId: trip.id,
-        seats,
-        carType,
-        notes,
-        available: true,
-      },
+      update: { seats, carType, startAddress: finalStartAddress, startLat: finalStartLat, startLng: finalStartLng, notes, available: true },
+      create: { userId: user.id, tripId: trip.id, seats, carType, startAddress: finalStartAddress, startLat: finalStartLat, startLng: finalStartLng, notes, available: true },
     });
 
-    return NextResponse.json({
-      success: true,
-      sessionId: session.id,
-      userId: user.id,
-      tripDate: saturday,
-    });
+    return NextResponse.json({ success: true, sessionId: session.id, userId: user.id, tripDate: saturday });
   } catch (err) {
     console.error(err);
     return NextResponse.json({ error: "Registration failed" }, { status: 500 });
-  }
-}
-
-// PATCH /api/drivers — update availability or seats
-export async function PATCH(req: NextRequest) {
-  try {
-    const { sessionId, available, seats, carType } = await req.json();
-
-    const updated = await prisma.driverSession.update({
-      where: { id: sessionId },
-      data: { available, seats, carType },
-    });
-
-    return NextResponse.json({ success: true, session: updated });
-  } catch (err) {
-    console.error(err);
-    return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 }

@@ -18,11 +18,8 @@ export function normalizePhone(phone: string): string {
   return phone.replace(/\D/g, "").slice(-10);
 }
 
-export function formatTripDate(date: Date | string | undefined | null): string {
-  if (!date) return "This Saturday";
-  const d = typeof date === "string" ? new Date(date) : date;
-  if (isNaN(d.getTime())) return "This Saturday";
-  return format(d, "EEEE, MMMM d, yyyy");
+export function formatTripDate(date: Date | string): string {
+  return format(new Date(date), "EEEE, MMMM d, yyyy");
 }
 
 export function getThisSaturday(): Date {

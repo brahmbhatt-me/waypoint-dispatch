@@ -1,145 +1,139 @@
 /**
- * temple-transport/src/lib/maps.ts
- *
- * Google Maps API integration:
- *  - Geocoding: address → lat/lng
- *  - Places Autocomplete: for address input UX
- *  - Distance Matrix: for accurate route time estimates (optional, costs $)
- *
- * COST NOTES (as of 2024):
- *  Geocoding API:      $5 per 1,000 requests
- *  Places API:         $17 per 1,000 autocomplete sessions
- *  Distance Matrix:    $5 per 1,000 elements
- *  Maps JS API:        $7 per 1,000 loads
- *
- *  For 40 passengers per week: ~40 geocodes = $0.20/week → ~$10/year
- *  Use free tier (200/month credit) → effectively FREE at this scale
+ * Google Maps integration with:
+ * - Geocoding API: address → lat/lng
+ * - Directions API: traffic-aware routing, no tolls
  */
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY!;
 
+export const TEMPLE = {
+  lat: 42.6334,
+  lng: -71.3162,
+  address: "BAPS Swaminarayan Mandir, 84 Industrial Ave E, Lowell, MA 01852",
+};
+
+export const RUGGLES = {
+  lat: 42.3365,
+  lng: -71.0997,
+  address: "Ruggles Station, Boston, MA 02120",
+};
+
 export interface GeocodeResult {
-  address: string; // formatted address from Google
+  address: string;
   lat: number;
   lng: number;
 }
 
-/**
- * Geocode an address string to lat/lng.
- * Called server-side when a passenger submits their address.
- */
+export interface DirectionsResult {
+  mapsUrl: string;
+  estimatedMinutes: number;
+  optimizedStopOrder?: string[];
+}
+
 export async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
-  if (!GOOGLE_MAPS_API_KEY) {
-    console.warn("GOOGLE_MAPS_API_KEY not set — using approximate coordinates");
-    return null;
-  }
-
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
-    address
-  )}&key=${GOOGLE_MAPS_API_KEY}&region=us&bounds=42.2,−71.5|42.7,−70.8`;
-
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}&region=us`;
   try {
     const res = await fetch(url);
     const data = await res.json();
+    if (data.status !== "OK" || !data.results[0]) return null;
+    return {
+      address: data.results[0].formatted_address,
+      lat: data.results[0].geometry.location.lat,
+      lng: data.results[0].geometry.location.lng,
+    };
+  } catch { return null; }
+}
 
-    if (data.status !== "OK" || data.results.length === 0) {
-      console.error("Geocode failed:", data.status, address);
-      return null;
+export async function getOptimizedRoute(
+  originAddress: string,
+  stops: { attendanceId: string; address: string; lat: number; lng: number }[]
+): Promise<DirectionsResult> {
+  const fallback = buildFallbackResult(originAddress, stops);
+  if (!GOOGLE_MAPS_API_KEY || stops.length === 0) return fallback;
+
+  const destination = stops[stops.length - 1];
+  const waypoints = stops.slice(0, -1);
+  const waypointsStr = waypoints.length > 0
+    ? `optimize:true|${waypoints.map((s) => `${s.lat},${s.lng}`).join("|")}`
+    : "";
+
+  const params: Record<string, string> = {
+    origin: encodeURIComponent(originAddress),
+    destination: `${destination.lat},${destination.lng}`,
+    key: GOOGLE_MAPS_API_KEY,
+    avoid: "tolls",
+    departure_time: "now",
+    traffic_model: "best_guess",
+  };
+  if (waypointsStr) params.waypoints = waypointsStr;
+
+  const queryString = Object.entries(params).map(([k, v]) => `${k}=${v}`).join("&");
+
+  try {
+    const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${queryString}`);
+    const data = await res.json();
+
+    if (data.status !== "OK") {
+      console.error("Directions API:", data.status);
+      return fallback;
     }
 
-    const result = data.results[0];
+    const route = data.routes[0];
+    const optimizedOrder: number[] = route.waypoint_order ?? [];
+
+    const totalSeconds = route.legs.reduce(
+      (sum: number, leg: any) => sum + (leg.duration_in_traffic?.value ?? leg.duration.value), 0
+    );
+
+    // Reorder stops based on Google optimization
+    let orderedStops = [...stops];
+    if (optimizedOrder.length > 0 && waypoints.length > 0) {
+      const reordered = optimizedOrder.map((i) => waypoints[i]);
+      orderedStops = [...reordered, destination];
+    }
+
     return {
-      address: result.formatted_address,
-      lat: result.geometry.location.lat,
-      lng: result.geometry.location.lng,
+      mapsUrl: buildGoogleMapsUrl(originAddress, orderedStops.map((s) => s.address)),
+      estimatedMinutes: Math.round(totalSeconds / 60),
+      optimizedStopOrder: orderedStops.map((s) => s.attendanceId),
     };
   } catch (err) {
-    console.error("Geocode error:", err);
-    return null;
+    console.error("Directions API error:", err);
+    return fallback;
   }
 }
 
-/**
- * Batch geocode multiple addresses.
- * Returns array of results (null where geocoding failed).
- * Small delays between requests to avoid rate limiting.
- */
-export async function batchGeocode(
-  addresses: string[]
-): Promise<(GeocodeResult | null)[]> {
-  const results: (GeocodeResult | null)[] = [];
-  for (const address of addresses) {
-    const result = await geocodeAddress(address);
-    results.push(result);
-    // Small delay to respect rate limits
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return results;
+function buildFallbackResult(
+  originAddress: string,
+  stops: { attendanceId: string; address: string }[]
+): DirectionsResult {
+  return {
+    mapsUrl: buildGoogleMapsUrl(originAddress, stops.map((s) => s.address)),
+    estimatedMinutes: 30,
+    optimizedStopOrder: stops.map((s) => s.attendanceId),
+  };
 }
 
-/**
- * Get estimated driving time (in minutes) between origin and multiple destinations.
- * Uses Google Distance Matrix API.
- *
- * USAGE: Call this AFTER clustering to get accurate route time estimates per car.
- * Don't call for clustering itself (use haversine instead to save cost).
- */
-export async function getDistanceMatrix(
-  origin: { lat: number; lng: number },
-  destinations: { lat: number; lng: number }[]
-): Promise<number[] | null> {
-  if (!GOOGLE_MAPS_API_KEY || destinations.length === 0) return null;
-
-  const origStr = `${origin.lat},${origin.lng}`;
-  const destStr = destinations.map((d) => `${d.lat},${d.lng}`).join("|");
-
-  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origStr}&destinations=${destStr}&key=${GOOGLE_MAPS_API_KEY}&units=imperial&mode=driving`;
-
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (data.status !== "OK") return null;
-
-    return data.rows[0].elements.map((el: any) =>
-      el.status === "OK" ? Math.round(el.duration.value / 60) : 30
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Generate a shareable Google Maps URL for a multi-stop route.
- * Origin: BAPS Temple Lowell
- * Waypoints: ordered intermediate stops
- * Destination: final stop
- *
- * Max 9 waypoints in Maps URL (we never exceed this for 3-8 passenger stops).
- */
-export function buildGoogleMapsUrl(stops: string[]): string {
+export function buildGoogleMapsUrl(origin: string, stops: string[]): string {
   if (stops.length === 0) return "";
-
-  const TEMPLE = "BAPS+Swaminarayan+Mandir,+84+Industrial+Ave+E,+Lowell,+MA+01852";
-  const encodedStops = stops.map((s) => encodeURIComponent(s));
-
-  if (stops.length === 1) {
-    return `https://www.google.com/maps/dir/?api=1&origin=${TEMPLE}&destination=${encodedStops[0]}&travelmode=driving`;
-  }
-
-  const destination = encodedStops[encodedStops.length - 1];
-  const waypoints = encodedStops.slice(0, -1).join("|");
-
-  return `https://www.google.com/maps/dir/?api=1&origin=${TEMPLE}&destination=${destination}&waypoints=${waypoints}&travelmode=driving`;
+  const destination = stops[stops.length - 1];
+  const waypoints = stops.slice(0, -1);
+  const base = "https://www.google.com/maps/dir/?api=1";
+  const parts = [
+    `origin=${encodeURIComponent(origin)}`,
+    `destination=${encodeURIComponent(destination)}`,
+    waypoints.length > 0 ? `waypoints=${waypoints.map(encodeURIComponent).join("|")}` : "",
+    "travelmode=driving",
+    "avoid=tolls",
+  ].filter(Boolean).join("&");
+  return `${base}&${parts}`;
 }
 
-/**
- * Build Apple Maps URL (fallback for iOS users who prefer Apple Maps)
- */
-export function buildAppleMapsUrl(stops: string[]): string {
-  if (stops.length === 0) return "";
-  const TEMPLE = "BAPS Swaminarayan Mandir, 84 Industrial Ave E, Lowell, MA 01852";
-  const allStops = [TEMPLE, ...stops];
-  const addr = allStops.map((s) => encodeURIComponent(s)).join("/");
-  return `http://maps.apple.com/?daddr=${addr}&dirflg=d`;
+export function validateUSPhone(phone: string): boolean {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length !== 10) return false;
+  if (parseInt(digits[0]) < 2) return false;
+  if (parseInt(digits[3]) < 2) return false;
+  return true;
 }

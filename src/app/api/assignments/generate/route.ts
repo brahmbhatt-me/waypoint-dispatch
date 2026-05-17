@@ -1,30 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import {
-  generateAssignments,
-  type PassengerPoint,
-  type DriverSlot,
-} from "@/lib/clustering";
+import { generateAssignments, type PassengerPoint, type DriverSlot } from "@/lib/clustering";
+import { getOptimizedRoute, buildGoogleMapsUrl, TEMPLE, RUGGLES } from "@/lib/maps";
 import { getThisSaturday } from "@/lib/utils";
 
-/**
- * POST /api/assignments/generate
- *
- * Main admin action: run the clustering algorithm and persist assignments.
- * Clears any previous assignments for the trip first.
- *
- * Body: { tripId?: string, adminCode: string }
- */
 export async function POST(req: NextRequest) {
   try {
     const { tripId: bodyTripId, adminCode } = await req.json();
 
-    // Simple admin auth (replace with proper session in production)
     if (adminCode !== (process.env.ADMIN_PASSCODE || "baps2024")) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Resolve trip
     let tripId = bodyTripId;
     if (!tripId) {
       const saturday = getThisSaturday();
@@ -36,26 +23,17 @@ export async function POST(req: NextRequest) {
       tripId = trip.id;
     }
 
-    // Mark trip as generating
-    await prisma.trip.update({
-      where: { id: tripId },
-      data: { status: "GENERATING" },
-    });
+    await prisma.trip.update({ where: { id: tripId }, data: { status: "GENERATING" } });
 
-    // Fetch all attending passengers with geocoded coords
+    // Fetch attending passengers (not marked absent)
     const attendances = await prisma.attendance.findMany({
-      where: { tripId, attending: true },
-      include: {
-        user: { select: { id: true, name: true, phone: true } },
-      },
+      where: { tripId, attending: true, markedAbsent: false },
+      include: { user: { select: { id: true, name: true, phone: true } } },
     });
 
-    // Fetch all available drivers
     const driverSessions = await prisma.driverSession.findMany({
       where: { tripId, available: true },
-      include: {
-        user: { select: { id: true, name: true, phone: true } },
-      },
+      include: { user: { select: { id: true, name: true, phone: true } } },
     });
 
     if (driverSessions.length === 0) {
@@ -68,16 +46,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No attending passengers" }, { status: 400 });
     }
 
-    // Flag passengers missing geocoords
     const ungeocoded = attendances.filter((a) => !a.dropoffLat || !a.dropoffLng);
-    if (ungeocoded.length > 0) {
-      console.warn(
-        `${ungeocoded.length} passengers missing geocoords:`,
-        ungeocoded.map((a) => a.user.name)
-      );
-    }
 
-    // Build typed passenger points (skip those without coords)
     const passengers: PassengerPoint[] = attendances
       .filter((a) => a.dropoffLat && a.dropoffLng)
       .map((a) => ({
@@ -100,36 +70,58 @@ export async function POST(req: NextRequest) {
       seats: d.seats,
     }));
 
-    // ─── RUN THE ALGORITHM ───────────────────────────────────────────────────
+    // Run clustering algorithm
     const clusterResults = generateAssignments(passengers, drivers);
 
-    // ─── PERSIST TO DATABASE ─────────────────────────────────────────────────
-    // Clear old assignments for this trip
-    await prisma.attendance.updateMany({
-      where: { tripId },
-      data: { assignmentId: null },
-    });
+    // Clear old assignments
+    await prisma.attendance.updateMany({ where: { tripId }, data: { assignmentId: null } });
     await prisma.assignment.deleteMany({ where: { tripId } });
 
-    // Create new assignments
+    // Create new assignments with Google Directions routes
     const created = await Promise.all(
       clusterResults
         .filter((r) => r.passengers.length > 0)
         .map(async (result) => {
+          const driver = driverSessions.find((d) => d.id === result.driverSessionId);
+
+          // Return trip: Temple → optimized stops (no tolls, with traffic)
+          const returnStops = result.stopOrder
+            .map((id) => result.passengers.find((p) => p.attendanceId === id))
+            .filter(Boolean)
+            .map((p) => ({ attendanceId: p!.attendanceId, address: p!.address, lat: p!.lat, lng: p!.lng }));
+
+          const returnRoute = await getOptimizedRoute(TEMPLE.address, returnStops);
+
+          // Going trip: Driver start → pickup passengers needing ride → Ruggles
+          let goingMapsUrl: string | undefined;
+          if (driver?.startAddress && driver?.startLat && driver?.startLng) {
+            const pickupPassengers = attendances
+              .filter((a) => {
+                const isInThisCar = result.passengers.some((p) => p.attendanceId === a.id);
+                return isInThisCar && a.pickupPreference === "DRIVER" && a.pickupAddress && a.pickupLat && a.pickupLng;
+              })
+              .map((a) => a.pickupAddress!);
+
+            const goingStops = [...pickupPassengers, RUGGLES.address];
+            goingMapsUrl = buildGoogleMapsUrl(driver.startAddress, goingStops);
+          }
+
+          const finalStopOrder = returnRoute.optimizedStopOrder ?? result.stopOrder;
+
           const assignment = await prisma.assignment.create({
             data: {
               tripId,
               driverSessionId: result.driverSessionId,
-              stopOrder: result.stopOrder,
-              mapsUrl: result.mapsUrl,
+              stopOrder: finalStopOrder,
+              mapsUrl: returnRoute.mapsUrl,
+              goingMapsUrl: goingMapsUrl ?? null,
+              estimatedMinutes: returnRoute.estimatedMinutes,
             },
           });
 
-          // Link each passenger's attendance to this assignment
+          // Link passengers
           await prisma.attendance.updateMany({
-            where: {
-              id: { in: result.passengers.map((p) => p.attendanceId) },
-            },
+            where: { id: { in: result.passengers.map((p) => p.attendanceId) } },
             data: { assignmentId: assignment.id },
           });
 
@@ -137,16 +129,15 @@ export async function POST(req: NextRequest) {
         })
     );
 
-    // Handle passengers who couldn't be geocoded — assign to car with most space
+    // Handle ungeocoded passengers
     if (ungeocoded.length > 0) {
       const assignmentCounts = await prisma.assignment.findMany({
         where: { tripId },
         include: { _count: { select: { passengers: true } }, driverSession: true },
       });
       const bestCar = assignmentCounts.sort(
-        (a, b) => a.driverSession.seats - a._count.passengers - (b.driverSession.seats - b._count.passengers)
+        (a, b) => (a.driverSession.seats - a._count.passengers) - (b.driverSession.seats - b._count.passengers)
       )[0];
-
       if (bestCar) {
         await prisma.attendance.updateMany({
           where: { id: { in: ungeocoded.map((a) => a.id) } },
@@ -155,35 +146,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Update trip status back to OPEN (admin can review before locking)
-    await prisma.trip.update({
-      where: { id: tripId },
-      data: { status: "OPEN" },
-    });
-
-    // Return summary
-    const summary = clusterResults.map((r) => ({
-      driverName: r.driverName,
-      carType: r.carType,
-      seats: r.seats,
-      passengerCount: r.passengers.length,
-      passengers: r.passengers.map((p) => ({ name: p.name, address: p.address })),
-      mapsUrl: r.mapsUrl,
-    }));
+    await prisma.trip.update({ where: { id: tripId }, data: { status: "OPEN" } });
 
     return NextResponse.json({
       success: true,
       assignmentsCreated: created.length,
       totalPassengersAssigned: passengers.length,
       ungeocodedCount: ungeocoded.length,
-      summary,
+      summary: clusterResults.map((r) => ({
+        driverName: r.driverName,
+        carType: r.carType,
+        passengerCount: r.passengers.length,
+        mapsUrl: r.mapsUrl,
+      })),
     });
   } catch (err) {
     console.error("Assignment generation error:", err);
-    // Reset trip status on error
-    return NextResponse.json(
-      { error: "Assignment generation failed", detail: String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Assignment generation failed", detail: String(err) }, { status: 500 });
   }
 }

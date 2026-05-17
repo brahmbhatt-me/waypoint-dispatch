@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+// GET /api/assignments/[id] — get a single assignment with full details
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -23,9 +24,15 @@ export async function GET(
       return NextResponse.json({ error: "Assignment not found" }, { status: 404 });
     }
 
+    // Reconstruct ordered passenger list from stopOrder
     const stopOrder = (assignment.stopOrder as string[]) ?? [];
-    const passengerMap = new Map(assignment.passengers.map((p) => [p.id, p]));
-    const orderedPassengers = stopOrder.map((id) => passengerMap.get(id)).filter(Boolean);
+    const passengerMap = new Map(
+      assignment.passengers.map((p) => [p.id, p])
+    );
+    const orderedPassengers = stopOrder
+      .map((id) => passengerMap.get(id))
+      .filter(Boolean);
+    // Add any not in stopOrder at the end
     const unordered = assignment.passengers.filter((p) => !stopOrder.includes(p.id));
     const allPassengers = [...orderedPassengers, ...unordered];
 
@@ -60,6 +67,7 @@ export async function GET(
   }
 }
 
+// PATCH /api/assignments/[id] — manual override: move passenger, update route, lock
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -74,26 +82,47 @@ export async function PATCH(
     }
 
     if (action === "lock") {
-      const updated = await prisma.assignment.update({ where: { id }, data: { isLocked: true } });
+      const updated = await prisma.assignment.update({
+        where: { id },
+        data: { isLocked: true },
+      });
       return NextResponse.json({ success: true, isLocked: updated.isLocked });
     }
 
     if (action === "unlock") {
-      const updated = await prisma.assignment.update({ where: { id }, data: { isLocked: false } });
+      const updated = await prisma.assignment.update({
+        where: { id },
+        data: { isLocked: false },
+      });
       return NextResponse.json({ success: true, isLocked: updated.isLocked });
     }
 
+    // Move passenger from this assignment to another
     if (action === "move_passenger") {
       const { attendanceId, toAssignmentId } = body;
+
+      // Verify target assignment has capacity
       const target = await prisma.assignment.findUnique({
         where: { id: toAssignmentId },
-        include: { _count: { select: { passengers: true } }, driverSession: true },
+        include: {
+          _count: { select: { passengers: true } },
+          driverSession: true,
+        },
       });
-      if (!target) return NextResponse.json({ error: "Target not found" }, { status: 404 });
+
+      if (!target) {
+        return NextResponse.json({ error: "Target assignment not found" }, { status: 404 });
+      }
+
       if (target._count.passengers >= target.driverSession.seats) {
         return NextResponse.json({ error: "Target car is full" }, { status: 400 });
       }
-      await prisma.attendance.update({ where: { id: attendanceId }, data: { assignmentId: toAssignmentId } });
+
+      await prisma.attendance.update({
+        where: { id: attendanceId },
+        data: { assignmentId: toAssignmentId },
+      });
+
       return NextResponse.json({ success: true });
     }
 
@@ -104,3 +133,5 @@ export async function PATCH(
   }
 }
 
+// GET all assignments for a trip
+export { GET as default };
