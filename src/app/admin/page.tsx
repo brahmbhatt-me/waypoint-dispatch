@@ -329,6 +329,7 @@ export default function AdminPage() {
                         {p.attending && !p.markedAbsent && !p.assignmentId && <span className="badge badge-orange">Unassigned</span>}
                       </div>
                       <p className="text-xs text-gray-500 mt-0.5 truncate">{p.dropoffAddress}</p>
+<p className="text-xs text-gray-400 mt-0.5">📞 {p.phone}</p>
                       {p.notes && <p className="text-xs text-blue-500 mt-0.5">📝 {p.notes}</p>}
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
@@ -368,6 +369,7 @@ export default function AdminPage() {
                         {!d.available && <span className="badge badge-gray">Unavailable</span>}
                       </div>
                       <p className="text-xs text-gray-500 mt-0.5">🚗 {d.carType || "Car not specified"} · {d.seats} seats</p>
+<p className="text-xs text-gray-400 mt-0.5">📞 {d.phone}</p>
                       {d.passengerCount > 0 && <p className="text-xs text-green-600 mt-0.5">👥 {d.passengerCount}/{d.seats} assigned</p>}
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
