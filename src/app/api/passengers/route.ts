@@ -13,11 +13,22 @@ export async function GET(req: NextRequest) {
       const normalized = normalizePhone(phone);
       const user = await prisma.user.findUnique({
         where: { phone: normalized },
-        include: {
-          addressHistory: { orderBy: { usedAt: "desc" }, take: 5 },
-        },
+        include: { addressHistory: { orderBy: { usedAt: "desc" }, take: 5 } },
       });
-      return NextResponse.json(user ?? null);
+      if (!user) return NextResponse.json(null);
+
+      // Check if this person is a driver for this week
+      const saturday = getThisSaturday();
+      const trip = await prisma.trip.findUnique({ where: { date: saturday } });
+      let isDriverThisWeek = false;
+      if (trip) {
+        const ds = await prisma.driverSession.findUnique({
+          where: { userId_tripId: { userId: user.id, tripId: trip.id } },
+        });
+        isDriverThisWeek = !!ds && ds.available;
+      }
+
+      return NextResponse.json({ ...user, isDriverThisWeek });
     }
 
     if (tripId) {
@@ -36,30 +47,41 @@ export async function GET(req: NextRequest) {
         orderBy: { createdAt: "asc" },
       });
 
+      // Exclude passengers who are also drivers for this trip
+      const driverUserIds = await prisma.driverSession.findMany({
+        where: { tripId, available: true },
+        select: { userId: true },
+      });
+      const driverIdSet = new Set(driverUserIds.map((d) => d.userId));
+
       return NextResponse.json(
-        attendances.map((a) => ({
-          id: a.id,
-          userId: a.userId,
-          name: a.user.name,
-          phone: a.user.phone,
-          dropoffAddress: a.dropoffAddress,
-          dropoffLat: a.dropoffLat,
-          dropoffLng: a.dropoffLng,
-          pickupPreference: a.pickupPreference,
-          pickupAddress: a.pickupAddress,
-          notes: a.notes,
-          attending: a.attending,
-          markedAbsent: a.markedAbsent,
-          assignmentId: a.assignmentId,
-          assignedDriver: a.assignment
-            ? {
-                name: a.assignment.driverSession.user.name,
-                phone: a.assignment.driverSession.user.phone,
-                carType: a.assignment.driverSession.carType,
-                mapsUrl: a.assignment.mapsUrl,
-              }
-            : null,
-        }))
+        attendances
+          .filter((a) => !driverIdSet.has(a.userId))
+          .map((a) => ({
+            id: a.id,
+            userId: a.userId,
+            name: a.user.name,
+            phone: a.user.phone,
+            dropoffAddress: a.dropoffAddress,
+            dropoffLat: a.dropoffLat,
+            dropoffLng: a.dropoffLng,
+            pickupPreference: a.pickupPreference,
+            pickupAddress: a.pickupAddress,
+            notes: a.notes,
+            attending: a.attending,
+            markedAbsent: a.markedAbsent,
+            isWalkIn: a.isWalkIn,
+            returnOnly: a.returnOnly,
+            assignmentId: a.assignmentId,
+            assignedDriver: a.assignment
+              ? {
+                  name: a.assignment.driverSession.user.name,
+                  phone: a.assignment.driverSession.user.phone,
+                  carType: a.assignment.driverSession.carType,
+                  mapsUrl: a.assignment.mapsUrl,
+                }
+              : null,
+          }))
       );
     }
 
@@ -78,6 +100,7 @@ export async function POST(req: NextRequest) {
       dropoffAddress, dropoffLat, dropoffLng,
       pickupPreference = "RUGGLES",
       pickupAddress, pickupLat, pickupLng,
+      returnOnly = false,
       saveAsDefault, notes, attending = true,
     } = body;
 
@@ -88,17 +111,15 @@ export async function POST(req: NextRequest) {
     const normalizedPhone = normalizePhone(phone);
     const saturday = getThisSaturday();
 
-    // Geocode if lat/lng not provided by autocomplete
+    // Geocode if lat/lng not provided
     let finalLat = dropoffLat ?? null;
     let finalLng = dropoffLng ?? null;
     let finalAddress = dropoffAddress;
-
     if (!finalLat || !finalLng) {
       const geo = await geocodeAddress(dropoffAddress);
       if (geo) { finalAddress = geo.address; finalLat = geo.lat; finalLng = geo.lng; }
     }
 
-    // Geocode pickup address if needed
     let finalPickupLat = pickupLat ?? null;
     let finalPickupLng = pickupLng ?? null;
     let finalPickupAddress = pickupAddress;
@@ -127,33 +148,28 @@ export async function POST(req: NextRequest) {
       create: { date: saturday, status: "OPEN" },
     });
 
-    if (trip.status === "LOCKED") {
+    if (trip.status === "LOCKED" || trip.status === "COMPLETED") {
       return NextResponse.json({ error: "Assignments are locked. Contact the organizer." }, { status: 403 });
     }
 
     const attendance = await prisma.attendance.upsert({
       where: { userId_tripId: { userId: user.id, tripId: trip.id } },
       update: {
-        dropoffAddress: finalAddress,
-        dropoffLat: finalLat,
-        dropoffLng: finalLng,
-        pickupPreference,
-        pickupAddress: pickupPreference === "DRIVER" ? finalPickupAddress : null,
-        pickupLat: pickupPreference === "DRIVER" ? finalPickupLat : null,
-        pickupLng: pickupPreference === "DRIVER" ? finalPickupLng : null,
-        notes, attending,
-        assignmentId: null,
-        confirmedAddress: true,
+        dropoffAddress: finalAddress, dropoffLat: finalLat, dropoffLng: finalLng,
+        pickupPreference: returnOnly ? "RUGGLES" : pickupPreference,
+        pickupAddress: !returnOnly && pickupPreference === "DRIVER" ? finalPickupAddress : null,
+        pickupLat: !returnOnly && pickupPreference === "DRIVER" ? finalPickupLat : null,
+        pickupLng: !returnOnly && pickupPreference === "DRIVER" ? finalPickupLng : null,
+        notes, attending, returnOnly, assignmentId: null, confirmedAddress: true,
       },
       create: {
         userId: user.id, tripId: trip.id,
-        dropoffAddress: finalAddress,
-        dropoffLat: finalLat, dropoffLng: finalLng,
-        pickupPreference,
-        pickupAddress: pickupPreference === "DRIVER" ? finalPickupAddress : null,
-        pickupLat: pickupPreference === "DRIVER" ? finalPickupLat : null,
-        pickupLng: pickupPreference === "DRIVER" ? finalPickupLng : null,
-        notes, attending,
+        dropoffAddress: finalAddress, dropoffLat: finalLat, dropoffLng: finalLng,
+        pickupPreference: returnOnly ? "RUGGLES" : pickupPreference,
+        pickupAddress: !returnOnly && pickupPreference === "DRIVER" ? finalPickupAddress : null,
+        pickupLat: !returnOnly && pickupPreference === "DRIVER" ? finalPickupLat : null,
+        pickupLng: !returnOnly && pickupPreference === "DRIVER" ? finalPickupLng : null,
+        notes, attending, returnOnly,
       },
     });
 

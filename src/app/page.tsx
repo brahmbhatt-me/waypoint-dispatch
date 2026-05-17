@@ -18,15 +18,12 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/trips")
-      .then((r) => r.json())
-      .then((data) => setTrip(data))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    fetch("/api/trips").then((r) => r.json()).then(setTrip).catch(console.error).finally(() => setLoading(false));
   }, []);
 
   const statusColor: Record<string, string> = {
     OPEN: "bg-green-100 text-green-700",
+    GOING_LOCKED: "bg-yellow-100 text-yellow-700",
     GENERATING: "bg-yellow-100 text-yellow-700",
     LOCKED: "bg-blue-100 text-blue-700",
     COMPLETED: "bg-gray-100 text-gray-600",
@@ -34,6 +31,7 @@ export default function HomePage() {
 
   const statusLabel: Record<string, string> = {
     OPEN: "Open — Signups Welcome",
+    GOING_LOCKED: "Going Trip Locked",
     GENERATING: "Generating Assignments...",
     LOCKED: "Assignments Ready",
     COMPLETED: "Trip Completed",
@@ -45,10 +43,7 @@ export default function HomePage() {
         <div className="max-w-lg mx-auto">
           <div className="text-4xl mb-3">🛕</div>
           <h1 className="text-2xl font-bold">BAPS Temple Transport</h1>
-          <p className="text-orange-100 mt-1 text-sm">
-            Ruggles Station → BAPS Swaminarayan Mandir, Lowell
-          </p>
-
+          <p className="text-orange-100 mt-1 text-sm">Ruggles Station → BAPS Swaminarayan Mandir, Lowell</p>
           {!loading && trip && (
             <div className="mt-5 bg-white/20 backdrop-blur rounded-xl p-4">
               <div className="flex items-center justify-between">
@@ -78,7 +73,7 @@ export default function HomePage() {
 
       <div className="max-w-lg mx-auto px-4 py-6 space-y-3">
         <Link href="/signup">
-          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md active:bg-gray-50 transition-all">
+          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md transition-all">
             <div className="w-12 h-12 bg-orange-100 rounded-xl flex items-center justify-center text-2xl flex-shrink-0">🙋</div>
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-gray-900">I&rsquo;m Attending</p>
@@ -91,7 +86,7 @@ export default function HomePage() {
         </Link>
 
         <Link href="/driver/register">
-          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md active:bg-gray-50 transition-all">
+          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md transition-all">
             <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center text-2xl flex-shrink-0">🚗</div>
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-gray-900">I&rsquo;m Driving</p>
@@ -116,6 +111,19 @@ export default function HomePage() {
           </div>
         </Link>
 
+        <Link href="/unregister">
+          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md transition-all">
+            <div className="w-12 h-12 bg-red-100 rounded-xl flex items-center justify-center text-2xl flex-shrink-0">❌</div>
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-gray-900">Cancel My Registration</p>
+              <p className="text-sm text-gray-500 mt-0.5">Remove yourself from this Saturday&rsquo;s trip</p>
+            </div>
+            <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </div>
+        </Link>
+
         <div className="relative py-2">
           <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200" /></div>
           <div className="relative flex justify-center">
@@ -124,7 +132,7 @@ export default function HomePage() {
         </div>
 
         <Link href="/admin">
-          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md active:bg-gray-50 transition-all">
+          <div className="card flex items-center gap-4 cursor-pointer hover:shadow-md transition-all">
             <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center text-2xl flex-shrink-0">⚙️</div>
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-gray-900">Admin Dashboard</p>

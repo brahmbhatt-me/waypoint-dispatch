@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { normalizePhone } from "@/lib/utils";
@@ -10,6 +10,13 @@ import dynamic from "next/dynamic";
 const AddressAutocomplete = dynamic(() => import("@/components/AddressAutocomplete"), { ssr: false });
 
 type Step = "phone" | "form" | "success";
+
+interface TripInfo {
+  id: string;
+  status: string;
+  goingLocked: boolean;
+  goingCutoff?: string;
+}
 
 interface PreviousUser {
   id: string;
@@ -21,6 +28,7 @@ interface PreviousUser {
 export default function SignupPage() {
   const [step, setStep] = useState<Step>("phone");
   const [loading, setLoading] = useState(false);
+  const [trip, setTrip] = useState<TripInfo | null>(null);
   const [phone, setPhone] = useState("");
   const [existingUser, setExistingUser] = useState<PreviousUser | null>(null);
   const [name, setName] = useState("");
@@ -34,6 +42,13 @@ export default function SignupPage() {
   const [notes, setNotes] = useState("");
   const [saveAsDefault, setSaveAsDefault] = useState(false);
   const [attending, setAttending] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/trips").then((r) => r.json()).then(setTrip).catch(console.error);
+  }, []);
+
+  const goingLocked = trip?.goingLocked ?? false;
+  const returnLocked = trip?.status === "LOCKED" || trip?.status === "COMPLETED";
 
   async function handlePhoneLookup() {
     const normalized = normalizePhone(phone);
@@ -59,23 +74,18 @@ export default function SignupPage() {
   }
 
   const handleAddressChange = useCallback((addr: string, lat?: number, lng?: number) => {
-    setAddress(addr);
-    setAddressLat(lat);
-    setAddressLng(lng);
+    setAddress(addr); setAddressLat(lat); setAddressLng(lng);
   }, []);
 
   const handlePickupAddressChange = useCallback((addr: string, lat?: number, lng?: number) => {
-    setPickupAddress(addr);
-    setPickupLat(lat);
-    setPickupLng(lng);
+    setPickupAddress(addr); setPickupLat(lat); setPickupLng(lng);
   }, []);
 
   async function handleSubmit() {
     if (!name.trim()) { toast.error("Please enter your name"); return; }
     if (attending && !address.trim()) { toast.error("Please enter your dropoff address"); return; }
-    if (attending && pickupPreference === "DRIVER" && !pickupAddress.trim()) {
-      toast.error("Please enter your pickup address");
-      return;
+    if (attending && !goingLocked && pickupPreference === "DRIVER" && !pickupAddress.trim()) {
+      toast.error("Please enter your pickup address"); return;
     }
 
     setLoading(true);
@@ -89,10 +99,11 @@ export default function SignupPage() {
           dropoffAddress: address.trim(),
           dropoffLat: addressLat,
           dropoffLng: addressLng,
-          pickupPreference,
-          pickupAddress: pickupPreference === "DRIVER" ? pickupAddress : undefined,
-          pickupLat: pickupPreference === "DRIVER" ? pickupLat : undefined,
-          pickupLng: pickupPreference === "DRIVER" ? pickupLng : undefined,
+          pickupPreference: goingLocked ? "RUGGLES" : pickupPreference,
+          pickupAddress: !goingLocked && pickupPreference === "DRIVER" ? pickupAddress : undefined,
+          pickupLat: !goingLocked && pickupPreference === "DRIVER" ? pickupLat : undefined,
+          pickupLng: !goingLocked && pickupPreference === "DRIVER" ? pickupLng : undefined,
+          returnOnly: goingLocked,
           saveAsDefault,
           notes: notes.trim() || undefined,
           attending,
@@ -106,6 +117,35 @@ export default function SignupPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  if (returnLocked) {
+    return (
+      <div className="page-container">
+        <div className="page-header">
+          <div className="max-w-lg mx-auto flex items-center gap-3">
+            <Link href="/" className="text-gray-400 p-1 -ml-1">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </Link>
+            <h1 className="font-bold">Register for This Saturday</h1>
+          </div>
+        </div>
+        <div className="page-content">
+          <div className="card text-center py-10">
+            <div className="text-4xl mb-3">🔒</div>
+            <h2 className="font-bold text-gray-900 mb-2">Assignments are locked</h2>
+            <p className="text-sm text-gray-500">
+              The organizer has finalized car assignments. Check your assignment below.
+            </p>
+            <Link href="/my-assignment">
+              <button className="btn-primary mt-4">📋 View My Assignment</button>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -125,6 +165,16 @@ export default function SignupPage() {
       </div>
 
       <div className="page-content">
+        {/* Going trip locked banner */}
+        {goingLocked && (
+          <div className="card bg-yellow-50 border-yellow-200">
+            <p className="text-sm text-yellow-800 font-medium">⏰ Going trip registration is closed</p>
+            <p className="text-xs text-yellow-700 mt-0.5">
+              You can still register for the <strong>return trip</strong> — just enter your dropoff address below.
+            </p>
+          </div>
+        )}
+
         {step === "phone" && (
           <div className="space-y-4">
             <div className="card">
@@ -132,14 +182,10 @@ export default function SignupPage() {
               <p className="text-sm text-gray-500 mb-4">US numbers only. We&rsquo;ll remember you for future trips.</p>
               <label className="label">Phone Number</label>
               <input
-                type="tel"
-                inputMode="numeric"
-                placeholder="(617) 555-0100"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
+                type="tel" inputMode="numeric" placeholder="(617) 555-0100"
+                value={phone} onChange={(e) => setPhone(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handlePhoneLookup()}
-                className="input"
-                autoFocus
+                className="input" autoFocus
               />
             </div>
             <button onClick={handlePhoneLookup} disabled={loading} className="btn-primary">
@@ -178,37 +224,33 @@ export default function SignupPage() {
 
               {attending && (
                 <>
-                  <div>
-                    <label className="label">How are you getting to Ruggles?</label>
-                    <div className="flex gap-3">
-                      <button onClick={() => setPickupPreference("RUGGLES")} className={`flex-1 py-2.5 rounded-xl font-medium text-sm transition-colors ${pickupPreference === "RUGGLES" ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-600"}`}>
-                        🚉 I&rsquo;ll meet at Ruggles
-                      </button>
-                      <button onClick={() => setPickupPreference("DRIVER")} className={`flex-1 py-2.5 rounded-xl font-medium text-sm transition-colors ${pickupPreference === "DRIVER" ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-600"}`}>
-                        🚗 Driver picks me up
-                      </button>
+                  {/* Only show pickup preference if going trip not locked */}
+                  {!goingLocked && (
+                    <div>
+                      <label className="label">How are you getting to Ruggles?</label>
+                      <div className="flex gap-3">
+                        <button onClick={() => setPickupPreference("RUGGLES")} className={`flex-1 py-2.5 rounded-xl font-medium text-sm transition-colors ${pickupPreference === "RUGGLES" ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-600"}`}>
+                          🚉 Meet at Ruggles
+                        </button>
+                        <button onClick={() => setPickupPreference("DRIVER")} className={`flex-1 py-2.5 rounded-xl font-medium text-sm transition-colors ${pickupPreference === "DRIVER" ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-600"}`}>
+                          🚗 Driver picks me up
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
-                  {pickupPreference === "DRIVER" && (
+                  {!goingLocked && pickupPreference === "DRIVER" && (
                     <div>
                       <label className="label">Your pickup address *</label>
-                      <AddressAutocomplete
-                        value={pickupAddress}
-                        onChange={handlePickupAddressChange}
-                        placeholder="Where should the driver pick you up?"
-                      />
-                      <p className="text-xs text-gray-400 mt-1">Driver will pick you up here before heading to Ruggles</p>
+                      <AddressAutocomplete value={pickupAddress} onChange={handlePickupAddressChange} placeholder="Where should the driver pick you up?" />
                     </div>
                   )}
 
                   <div>
-                    <label className="label">Return dropoff address *</label>
-                    <AddressAutocomplete
-                      value={address}
-                      onChange={handleAddressChange}
-                      placeholder="Where should you be dropped off?"
-                    />
+                    <label className="label">
+                      {goingLocked ? "Your dropoff address for return trip *" : "Return dropoff address *"}
+                    </label>
+                    <AddressAutocomplete value={address} onChange={handleAddressChange} placeholder="Where should you be dropped off?" />
                     {existingUser?.addressHistory && existingUser.addressHistory.length > 0 && (
                       <div className="mt-2 space-y-1">
                         <p className="text-xs text-gray-500 font-medium">Recent addresses:</p>
@@ -247,11 +289,18 @@ export default function SignupPage() {
               <h2 className="text-xl font-bold mb-2">{attending ? "You're registered!" : "Got it!"}</h2>
               <p className="text-gray-500 text-sm">
                 {attending
-                  ? pickupPreference === "DRIVER"
-                    ? "Your driver will pick you up before heading to Ruggles. You'll get your assignment soon!"
-                    : "Meet at Ruggles Station. You'll get your car assignment before the return trip."
+                  ? goingLocked
+                    ? "You're registered for the return trip. Check your assignment once the organizer finalizes it."
+                    : pickupPreference === "DRIVER"
+                      ? "Your driver will pick you up before heading to Ruggles!"
+                      : "Meet at Ruggles Station. You'll get your car assignment before the return trip."
                   : "See you next week!"}
               </p>
+              {attending && (
+                <Link href="/my-assignment">
+                  <button className="btn-secondary mt-4">📋 Check My Assignment</button>
+                </Link>
+              )}
             </div>
             <Link href="/"><button className="btn-primary">← Back to Home</button></Link>
           </div>

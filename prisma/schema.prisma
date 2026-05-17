@@ -15,10 +15,10 @@ enum Role {
 }
 
 enum TripStatus {
-  OPEN
-  GENERATING
-  LOCKED
-  COMPLETED
+  OPEN           // Both going and return open
+  GOING_LOCKED   // Going trip locked, return still open
+  LOCKED         // Both locked, assignments released
+  COMPLETED      // Trip done
 }
 
 enum PickupPreference {
@@ -30,7 +30,6 @@ model User {
   id             String   @id @default(cuid())
   name           String
   phone          String   @unique
-  email          String?  @unique
   role           Role     @default(PASSENGER)
   defaultAddress String?
   defaultLat     Float?
@@ -47,12 +46,16 @@ model User {
 }
 
 model Trip {
-  id        String     @id @default(cuid())
-  date      DateTime   @unique
-  status    TripStatus @default(OPEN)
-  notes     String?
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id              String     @id @default(cuid())
+  date            DateTime   @unique
+  status          TripStatus @default(OPEN)
+  notes           String?
+  // Going trip locks at this time (default Friday 11pm)
+  goingCutoff     DateTime?
+  // Human-readable summary for group chat sharing
+  assignmentSummary String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   attendances    Attendance[]
   driverSessions DriverSession[]
@@ -74,6 +77,10 @@ model Attendance {
   pickupLng        Float?
   notes            String?
   attending        Boolean          @default(true)
+  // Return only = signed up after going trip cutoff
+  returnOnly       Boolean          @default(false)
+  // Walk-in = added by admin at temple
+  isWalkIn         Boolean          @default(false)
   markedAbsent     Boolean          @default(false)
   confirmedAddress Boolean          @default(false)
   createdAt        DateTime         @default(now())
